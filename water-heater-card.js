@@ -1,6 +1,6 @@
 /*! Water Heater Card — animated water-heater card for Home Assistant · MIT · github.com/stathisktm/water-heater-card */
 
-const WH_VERSION = "2.0.0";
+const WH_VERSION = "2.1.0";
 
 const WH_DEFAULTS = {
   title: "Θερμοσίφωνο",
@@ -8,6 +8,7 @@ const WH_DEFAULTS = {
   entity_switch: "",
   entity_temp: "",
   entity_power: "",
+  entity_off_temp: "",
   temp_high: 42,
   temp_mid: 35,
   temp_max: 60,
@@ -354,6 +355,14 @@ class WaterHeaterCard extends HTMLElement {
     this._drawGraph();
   }
 
+  /** The device's own switch-off temperature (e.g. a thermostat's set point), or null when not set/available. */
+  _offTemp() {
+    const ent = this._hass?.states?.[this._config?.entity_off_temp];
+    if (!ent || whBad(ent.state)) return null;
+    const v = parseFloat(ent.state);
+    return Number.isFinite(v) ? v : null;
+  }
+
   /** "On for", heating rate and time to the high limit — from the switch and the temperature history. */
   _updateClock() {
     const $ = (id) => this.shadowRoot.getElementById(id);
@@ -365,15 +374,20 @@ class WaterHeaterCard extends HTMLElement {
     if (isOn) onFor.lastElementChild.textContent = `Ανοιχτό ${whMinutes(Date.now() - new Date(sw.last_changed).getTime())}`;
 
     const rate = this._rate();
-    const high = Number(this._config.temp_high) || 42;
+    const off = this._offTemp();
+    const target = off ?? (Number(this._config.temp_high) || 42);
     $("rate").textContent = rate !== null && Math.abs(rate) >= 0.05
       ? `${rate > 0 ? "▲ +" : "▼ "}${rate.toFixed(1)}°/λεπτό`
       : "";
     const eta = $("eta");
     const t = this._t;
-    const showEta = isOn && rate !== null && rate > 0.05 && t !== null && t < high;
+    const showEta = isOn && rate !== null && rate > 0.05 && t !== null && t < target;
     eta.classList.toggle("hidden", !showEta);
-    if (showEta) eta.lastElementChild.textContent = `~${whMinutes(((high - t) / rate) * 60000)} για ${high}°`;
+    if (showEta) {
+      const left = `~${whMinutes(((target - t) / rate) * 60000)}`;
+      eta.lastElementChild.textContent = off !== null ? `${left} σβήνει στους ${Math.round(off)}°` : `${left} για ${target}°`;
+      eta.firstElementChild.setAttribute("icon", off !== null ? "mdi:power-plug-off-outline" : "mdi:flag-checkered");
+    }
   }
 
   /** °C per minute over the last 15 minutes of history (least squares), or null. */
@@ -438,7 +452,8 @@ class WaterHeaterCard extends HTMLElement {
     const hours = Number(cfg.graph_hours) || 6;
     const x0 = Date.now() - hours * 3600000, x1 = Date.now();
     const high = Number(cfg.temp_high) || 42, mid = Number(cfg.temp_mid) || 35;
-    const ys = pts.map((p) => p.y).concat([high, mid]);
+    const off = this._offTemp();
+    const ys = pts.map((p) => p.y).concat(off !== null ? [high, mid, off] : [high, mid]);
     const lo = Math.floor(Math.min(...ys) - 1), hi = Math.ceil(Math.max(...ys) + 1);
     const X = (x) => ((Math.max(x, x0) - x0) / (x1 - x0)) * W;
     const Y = (y) => H - ((y - lo) / (hi - lo || 1)) * H;
@@ -446,13 +461,13 @@ class WaterHeaterCard extends HTMLElement {
     let d = `M${X(pts[0].x).toFixed(1)},${Y(pts[0].y).toFixed(1)}`;
     for (let i = 1; i < pts.length; i++) d += ` H${X(pts[i].x).toFixed(1)} V${Y(pts[i].y).toFixed(1)}`;
     const area = `${d} V${H} H${X(pts[0].x).toFixed(1)} Z`;
-    const line = (y, label) =>
-      `<line x1="0" x2="${W}" y1="${Y(y).toFixed(1)}" y2="${Y(y).toFixed(1)}" stroke="rgba(255,255,255,.35)" stroke-dasharray="3 3" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
+    const line = (y, label, strong = false) =>
+      `<line x1="0" x2="${W}" y1="${Y(y).toFixed(1)}" y2="${Y(y).toFixed(1)}" stroke="rgba(255,255,255,${strong ? ".8" : ".35"})" stroke-dasharray="${strong ? "1 2" : "3 3"}" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
       `<text x="${W - 2}" y="${(Y(y) - 2).toFixed(1)}" text-anchor="end" font-size="7" fill="rgba(255,255,255,.7)">${label}°</text>`;
     graph.innerHTML = `
       <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="Θερμοκρασία ${hours} ωρών">
         <defs><linearGradient id="whg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".35"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>
-        ${line(high, high)}${line(mid, mid)}
+        ${line(high, high)}${line(mid, mid)}${off !== null && off !== high ? line(off, `⏻ ${Math.round(off)}`, true) : ""}
         <path d="${area}" fill="url(#whg)" stroke="none"/>
         <path d="${d}" fill="none" stroke="#fff" stroke-width="1.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
       </svg>`;
@@ -465,7 +480,7 @@ class WaterHeaterCard extends HTMLElement {
 
 const WH_LABELS = {
   title: "Τίτλος", icon: "Εικονίδιο", entity_switch: "Διακόπτης", entity_temp: "Αισθητήρας θερμοκρασίας",
-  entity_power: "Κατανάλωση (προαιρετικό)", temp_mid: "Μεσαίο όριο (°C)", temp_high: "Υψηλό όριο / έτοιμο (°C)",
+  entity_power: "Κατανάλωση (προαιρετικό)", entity_off_temp: "Θερμοκρασία απενεργοποίησης — αντίστροφη μέτρηση (προαιρετικό)", temp_mid: "Μεσαίο όριο (°C)", temp_high: "Υψηλό όριο / έτοιμο (°C)",
   temp_max: "Πάνω όριο δοχείου (°C)", theme: "Θέμα", show_graph: "Γράφημα θερμοκρασίας", graph_hours: "Ώρες γραφήματος",
   tap_toggle: "Πάτημα = άναμμα/σβήσιμο",
 };
@@ -490,6 +505,7 @@ class WaterHeaterCardEditor extends HTMLElement {
       { name: "entity_switch", selector: { entity: { filter: { domain: ["switch", "input_boolean", "light"] } } } },
       { name: "entity_temp", selector: { entity: { filter: { domain: ["sensor"], device_class: "temperature" } } } },
       { name: "entity_power", selector: { entity: { filter: { domain: ["sensor"], device_class: "power" } } } },
+      { name: "entity_off_temp", selector: { entity: { filter: { domain: ["sensor", "number", "input_number"] } } } },
       { type: "grid", name: "", schema: [
         { name: "temp_mid", selector: { number: { min: 0, max: 100, step: 0.5, mode: "box", unit_of_measurement: "°C" } } },
         { name: "temp_high", selector: { number: { min: 0, max: 100, step: 0.5, mode: "box", unit_of_measurement: "°C" } } },
